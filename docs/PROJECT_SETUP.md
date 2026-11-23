@@ -1,38 +1,63 @@
-# Project Setup: Rebuilding the Instagram Recommendation Algorithm
+# Project: Two-Tower Short-Video Recommender (Instagram Explore-style)
 
-## Overview
-Rebuild a simplified, Instagram-style feed recommendation system from scratch as a learning ML project: data → candidate generation → ranking → re-ranking → evaluation.
+## What we're building
+A recommender that picks videos for each user, similar in spirit to the model Meta describes for Instagram Explore. Users and videos are turned into vectors so that users land close to the videos they'd like. Recommendation then becomes a nearest-match search.
 
-Instagram's real algorithm is proprietary, so this is an independent re-implementation using synthetic or public data. All details below are placeholders and will be updated.
+Instagram's production system is proprietary, so this is a learning re-implementation trained on real public watch data from a short-video app (KuaiRec, from Kuaishou).
 
 ## Goals
-- Build an end-to-end recommendation pipeline that runs locally
-- Implement a two-stage architecture (candidate generation + ranking)
-- Support training, evaluation, and inference with reproducible experiments
-- Document design decisions in the repo
+- Train a two-tower retrieval model on real watch data
+- Beat a popularity baseline on Recall@50
+- Correct for popularity bias during training (logQ correction)
+- Visualize video embeddings and show category clusters
+- Stretch: add a re-ranking step over the top 200 candidates
 
-## Non-Goals
+## Non-goals
 - Matching Instagram's production scale or exact behavior
-- Using real user data or scraping Instagram
+- Scraping Instagram or using private user data
 
-## System Design (proposed)
-| Stage | Purpose | Initial approach |
-|---|---|---|
-| Data ingestion | Users, posts, interactions | Synthetic generator or public dataset |
-| Feature engineering | User, post, user-post features | Pandas feature module |
-| Candidate generation | Narrow millions to hundreds | Two-tower embeddings + ANN search |
-| Ranking | Score candidates | LightGBM, then a neural ranker |
-| Re-ranking | Diversity, freshness, dedup | Rules + MMR |
-| Evaluation | Offline quality | Recall@K, NDCG@K, MAP, AUC |
-| Serving | Return a feed | FastAPI endpoint |
+## Dataset
+- **KuaiRec**: real watch data from the Kuaishou short-video app, with millions of interactions. A small fully-observed test set has 1,411 users who watched almost every video, which allows fair offline evaluation.
+  - Site: https://kuairec.com/ (CC BY-SA 4.0)
+  - Download links and docs: https://github.com/chongminggao/KuaiRec
+- Paper: https://arxiv.org/abs/2202.10842
 
-Signals to model (placeholders):
-- Engagement: likes, comments, shares, saves, watch time
-- Relationship: follows, DMs, profile visits
-- Content: topic, media type, caption, post age
-- Author: popularity, activity level
+Data is stored under `data/raw/` and `data/processed/`, both gitignored.
 
-## Proposed Repository Structure
+## Pipeline
+
+### Step 1: Get the data
+Download KuaiRec and document the schema in `data/README.md`.
+
+### Step 2: Define "liked"
+The dataset records how much of each video was watched. A video counts as **liked** if the user watched it **two or more times**. This threshold lives in `configs/default.yaml` so it can be changed.
+
+### Step 3: Build the two towers
+- **User tower:** a small network that maps user features to a 64-dimensional vector.
+- **Item tower:** a small network that maps video features (video ID and categories) to a 64-dimensional vector.
+- **Score:** similarity between the two vectors (dot product or cosine).
+
+### Step 4: Train
+Use in-batch negatives. Each batch contains user-video pairs where the user liked the video. The model learns to score the liked video higher than the other videos in the same batch.
+
+### Step 5: Correct for popularity bias (logQ)
+Popular videos appear in almost every batch, so the model can learn to push them down. During training, add a small boost based on each video's sampling probability (logQ correction), following Google's sampling-bias-corrected two-tower method.
+
+### Step 6: Evaluate
+For each test user in the fully-observed set:
+1. Take the top 50 videos by score.
+2. Count how many of the videos the user liked appear in that list. This is **Recall@50**.
+3. Compare against a **popularity baseline** that shows the 50 most popular videos.
+
+If the model does not beat the popularity baseline, keep improving it before moving on.
+
+### Step 7: Visualize
+Reduce video vectors to 2D (UMAP or t-SNE), color points by category, and check that similar videos form clusters. Save the figure to `docs/`.
+
+### Stretch: Re-ranking
+Take the top 200 candidates from retrieval and re-rank them with a second model that uses extra features, such as video length. Report how Recall@50 changes compared to retrieval alone.
+
+## Proposed repository structure
 ```
 Rebuilding-Instagram-algorithm/
 ├── README.md
@@ -40,106 +65,95 @@ Rebuilding-Instagram-algorithm/
 ├── requirements.txt
 ├── pyproject.toml
 ├── .gitignore
-├── .env.example
-├── configs/            # YAML configs for data, model, training
+├── configs/
+│   └── default.yaml        # liked threshold, embedding size, training params
 ├── data/
-│   ├── raw/            # gitignored
-│   ├── processed/      # gitignored
-│   └── README.md       # data sources and schema
-├── notebooks/          # EDA and experiments
+│   ├── raw/                # gitignored
+│   ├── processed/          # gitignored
+│   └── README.md           # KuaiRec schema and download steps
+├── notebooks/              # EDA and visualization
 ├── src/
-│   ├── data/           # loaders, synthetic data generator
-│   ├── features/       # feature engineering
-│   ├── candidate_gen/  # two-tower model, ANN index
-│   ├── ranking/        # ranking models
-│   ├── rerank/         # diversity and business rules
-│   ├── evaluation/     # metrics
-│   ├── serving/        # FastAPI app
-│   └── utils/
+│   ├── data/               # loading, liked-label construction
+│   ├── models/             # user tower, item tower, logQ correction
+│   ├── train.py
+│   ├── evaluate.py         # Recall@50, popularity baseline
+│   ├── visualize.py        # 2D embedding plots
+│   └── rerank/             # stretch: second-stage re-ranker
 ├── tests/
-├── scripts/            # generate_data.py, train.py, evaluate.py
-└── docs/               # design notes, diagrams
+├── docs/
+│   ├── PROJECT_SETUP.md
+│   └── figures/
+└── scripts/
 ```
 
-## Tech Stack (proposed)
+## Tech stack
 - Python 3.10+
-- Data: pandas, numpy, pyarrow
-- ML: scikit-learn, LightGBM/XGBoost, PyTorch
-- Retrieval: FAISS
-- Experiment tracking: MLflow or Weights & Biases (TBD)
-- API: FastAPI + Uvicorn
-- Quality: pytest, ruff, black, pre-commit
+- PyTorch (two-tower model), with TorchRec or TensorFlow Recommenders as reference implementations
+- pandas, numpy, pyarrow
+- FAISS for nearest-neighbor search at retrieval time
+- UMAP or scikit-learn for visualization
+- pytest, ruff, black
 
-## Environment Setup
+## Setup
 ```bash
 git clone https://github.com/UdaySharmaGitHub/Rebuilding-Instagram-algorithm.git
 cd Rebuilding-Instagram-algorithm
 
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
 pip install -r requirements.txt
-cp .env.example .env
 
-python scripts/generate_data.py --users 1000 --posts 5000
-python scripts/train.py --config configs/default.yaml
-python scripts/evaluate.py
-uvicorn src.serving.app:app --reload
+# Download KuaiRec into data/raw/ (see data/README.md)
+python -m src.train --config configs/default.yaml
+python -m src.evaluate --config configs/default.yaml
+python -m src.visualize --config configs/default.yaml
 ```
 
-## Data Plan (dummy for now)
-- `users`: user_id, age_bucket, country, interests, created_at
-- `posts`: post_id, author_id, media_type, topic, caption, created_at
-- `interactions`: user_id, post_id, event_type, timestamp, dwell_time
-- `follows`: follower_id, followee_id
+## Reading list
+- Engineering at Meta: Scaling the Instagram Explore recommendations system (https://engineering.fb.com/2023/08/09/ml-applications/scaling-instagram-explore-recommendations-system/)
+- Google Research: Sampling-Bias-Corrected Neural Modeling for Large Corpus Item Recommendations (https://research.google/pubs/sampling-bias-corrected-neural-modeling-for-large-corpus-item-recommendations/)
+- KuaiRec: A Fully-observed Dataset (https://arxiv.org/abs/2202.10842)
+- TensorFlow Recommenders, basic retrieval tutorial (https://www.tensorflow.org/recommenders/examples/basic_retrieval)
+- TorchRec retrieval example (https://github.com/pytorch/torchrec/tree/main/examples/retrieval)
 
-Use a time-based train/validation/test split to avoid leakage.
+## Results (to be filled in)
+- Dataset size: [N]M interactions
+- Recall@50, two-tower model: [X]%
+- Recall@50, popularity baseline: [Y]%
 
-## Evaluation Plan
-- Retrieval: Recall@50, Recall@100
-- Ranking: NDCG@10, MAP@10, AUC, log loss
-- Beyond accuracy: diversity, novelty, coverage
-- Baselines: popularity, recency, random
+## Resume line
+Built a two-tower recommender in PyTorch on [N]M real short-video interactions (KuaiRec), reaching [X]% Recall@50 versus [Y]% for a popularity baseline.
 
-## Task Checklist
+## Task checklist
 **Phase 1: Foundation**
-- [ ] Initialize repo structure, packaging, and linting
-- [ ] Write README with project overview
-- [ ] Add `.gitignore`, `requirements.txt`, `.env.example`
-- [ ] Set up CI (lint + tests)
+- [ ] Repo structure, packaging, linting, `.gitignore`
+- [ ] README with project overview
+- [ ] Download KuaiRec and document schema
 
 **Phase 2: Data**
-- [ ] Build synthetic data generator
-- [ ] Define schemas and data validation
+- [ ] Build liked labels (watch count ≥ 2)
+- [ ] Train/test split using the fully-observed test users
 - [ ] EDA notebook
 
-**Phase 3: Modeling**
-- [ ] Popularity and recency baselines
-- [ ] Feature engineering pipeline
-- [ ] Two-tower candidate generation + FAISS index
-- [ ] Ranking model (LightGBM, then neural)
-- [ ] Re-ranking for diversity and freshness
+**Phase 3: Model**
+- [ ] Popularity baseline and Recall@50 evaluation
+- [ ] User and item towers
+- [ ] In-batch negative training
+- [ ] logQ popularity correction
 
-**Phase 4: Evaluation and Serving**
-- [ ] Offline evaluation suite
-- [ ] FastAPI feed endpoint
-- [ ] Experiment tracking
+**Phase 4: Analysis**
+- [ ] Recall@50 comparison against baseline
+- [ ] 2D embedding visualization by category
+- [ ] Stretch: re-ranking top 200 with video length
 
 **Phase 5: Docs**
-- [ ] Architecture diagram
-- [ ] Design decision log
-- [ ] Results and learnings write-up
+- [ ] Results section filled in
+- [ ] Resume line updated with final numbers
 
-## Risks and Open Questions
-- Which dataset replaces synthetic data, if any?
-- How realistic should simulated user behavior be?
-- Compute limits for training neural models locally
-- Cold-start handling for new users and posts
-
-## Acceptance Criteria
-- Fresh clone to running pipeline in under 10 minutes using the setup steps above
-- Baseline and model metrics reproducible from a single command
-- Tests pass in CI
+## Open questions
+- Which features beyond video ID and category go into the item tower?
+- Should the user tower use watch history as well as user IDs?
+- How many negatives per batch fit in memory on the available hardware?
 
 ---
-*Dummy details above are placeholders and will be updated as the project evolves.*
+*This plan is a working draft and will be updated as the project progresses.*
